@@ -553,7 +553,11 @@ const tools: z.infer<typeof ToolSchema>[] = [
         },
         grep: {
           type: "string",
-          description: "Optional: filter log lines matching this pattern",
+          description: "Optional: filter log lines matching this regex pattern (case-insensitive)",
+        },
+        grep_context: {
+          type: "number",
+          description: "Optional: number of context lines to show around each grep match (like grep -C). Default: 0",
         },
         tail: {
           type: "number",
@@ -1051,23 +1055,42 @@ async function fetchBuildLog(
   const drvPaths = stderr.match(DRV_PATH_REGEX);
   if (!drvPaths || drvPaths.length === 0) return null;
 
-  // Deduplicate, take the last (most specific) derivation
+  // Deduplicate; try each derivation looking for one with errors
   const uniqueDrvs = [...new Set(drvPaths)];
-  const targetDrv = uniqueDrvs[uniqueDrvs.length - 1];
+  let bestLog: string | null = null;
 
-  try {
-    const logResult = await execNix(["log", targetDrv], workingDirectory);
-    if (logResult.exitCode !== 0 || !logResult.stdout.trim()) {
-      return null;
+  // Try derivations in reverse order (most specific first)
+  for (let i = uniqueDrvs.length - 1; i >= 0; i--) {
+    try {
+      const logResult = await execNix(["log", uniqueDrvs[i]], workingDirectory);
+      if (logResult.exitCode !== 0 || !logResult.stdout.trim()) continue;
+
+      const logLines = logResult.stdout.split("\n");
+      const hasErrors = logLines.some((line) =>
+        ERROR_PATTERNS.some((p) => p.test(line)),
+      );
+
+      if (hasErrors) {
+        // Found a log with actual errors — use it
+        if (logLines.length > MAX_FETCHED_LOG_LINES) {
+          return extractErrorLines(logLines).join("\n");
+        }
+        return logResult.stdout;
+      }
+
+      // Keep as fallback if no error-containing log is found
+      if (!bestLog) {
+        bestLog =
+          logLines.length > MAX_FETCHED_LOG_LINES
+            ? extractErrorLines(logLines).join("\n")
+            : logResult.stdout;
+      }
+    } catch {
+      continue;
     }
-    const logLines = logResult.stdout.split("\n");
-    if (logLines.length > MAX_FETCHED_LOG_LINES) {
-      return extractErrorLines(logLines).join("\n");
-    }
-    return logResult.stdout;
-  } catch {
-    return null;
   }
+
+  return bestLog;
 }
 
 // Tool handlers
@@ -1251,6 +1274,15 @@ async function handleTool(
     case "log": {
       const nixArgs = ["log", args.installable as string];
       const result = await execNix(nixArgs, args.working_directory as string);
+
+      // For large build logs, use error extraction instead of generic truncation
+      if (result.stdout) {
+        const logLines = result.stdout.split("\n");
+        if (logLines.length > MAX_OUTPUT_LINES) {
+          const extracted = extractErrorLines(logLines);
+          result.stdout = extracted.join("\n");
+        }
+      }
       return formatResult(nixArgs.join(" "), result);
     }
 
@@ -1312,10 +1344,37 @@ async function handleTool(
       // Apply grep filter
       if (args.grep) {
         const pattern = new RegExp(args.grep as string, "i");
-        output = output
-          .split("\n")
-          .filter((line) => pattern.test(line))
-          .join("\n");
+        const contextSize = (args.grep_context as number) ?? 0;
+        const allLines = output.split("\n");
+
+        if (contextSize > 0) {
+          // Context-aware grep: keep N lines around each match
+          const matchIndices: Set<number> = new Set();
+          for (let i = 0; i < allLines.length; i++) {
+            if (pattern.test(allLines[i])) {
+              for (
+                let j = Math.max(0, i - contextSize);
+                j <= Math.min(allLines.length - 1, i + contextSize);
+                j++
+              ) {
+                matchIndices.add(j);
+              }
+            }
+          }
+          const sorted = [...matchIndices].sort((a, b) => a - b);
+          const result: string[] = [];
+          let lastIdx = -1;
+          for (const idx of sorted) {
+            if (lastIdx !== -1 && idx > lastIdx + 1) {
+              result.push(`... (${idx - lastIdx - 1} lines omitted) ...`);
+            }
+            result.push(allLines[idx]);
+            lastIdx = idx;
+          }
+          output = result.join("\n");
+        } else {
+          output = allLines.filter((line) => pattern.test(line)).join("\n");
+        }
       }
 
       // Apply head/tail
@@ -1820,7 +1879,10 @@ function formatResult(
   if (result.exitCode !== 0) {
     statusParts.push(`Exit code: ${result.exitCode}`);
   }
-  if (logId) {
+  if (logId && result.exitCode !== 0) {
+    statusParts.push(`Errors: use nix_build_errors with id="${logId}"`);
+    statusParts.push(`Full log: use nix_get_log with id="${logId}"`);
+  } else if (logId) {
     statusParts.push(`Full log: use nix_get_log with id="${logId}"`);
   }
 
