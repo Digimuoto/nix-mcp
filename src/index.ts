@@ -1360,6 +1360,16 @@ async function handleTool(
         return `Log not found: ${logId}\nUse nix_list_logs to see available logs.`;
       }
 
+      // Early return for successful commands unless custom patterns requested
+      if (entry.exitCode === 0 && !args.patterns) {
+        return [
+          `Command: nix ${entry.command}`,
+          `Exit code: 0`,
+          "",
+          "No errors — command completed successfully.",
+        ].join("\n");
+      }
+
       const stream = (args.stream as string) || "both";
       let output: string;
       if (stream === "stdout") output = entry.stdout;
@@ -1380,11 +1390,11 @@ async function handleTool(
         }
       }
 
-      const contextSize = (args.context as number) ?? 3;
-      const extracted = extractErrorLines(lines, patterns, contextSize, contextSize);
-
-      const hasContent = extracted.some((line) => line.trim() !== "");
-      if (!hasContent) {
+      // Check if any lines actually match error patterns before extracting
+      const hasErrors = lines.some((line) =>
+        patterns.some((p) => p.test(line)),
+      );
+      if (!hasErrors) {
         return [
           `Command: nix ${entry.command}`,
           `Exit code: ${entry.exitCode}`,
@@ -1393,6 +1403,9 @@ async function handleTool(
           "Use get_log to see the full output.",
         ].join("\n");
       }
+
+      const contextSize = (args.context as number) ?? 3;
+      const extracted = extractErrorLines(lines, patterns, contextSize, contextSize);
 
       return [
         `Command: nix ${entry.command}`,
@@ -1749,6 +1762,16 @@ function formatResult(
         if (line.match(/^copying path/)) return false;
         // Filter download progress
         if (line.match(/^\s*\d+(\.\d+)?\s*(KiB|MiB|GiB)/)) return false;
+        // Filter evaluation traces (e.g., "evaluating 'legacyPackages...'" — can be 100k+ lines)
+        if (line.match(/^\s*evaluating '/)) return false;
+        // Filter "Using saved setting" messages from trusted-settings.json
+        if (line.match(/^\s*Using saved setting/)) return false;
+        // Filter nixpkgs rename/deprecation warnings (not actionable)
+        if (line.match(/^\s*evaluation warning:.*renamed to/)) return false;
+        if (line.match(/^\s*evaluation warning:.*was removed/)) return false;
+        if (line.match(/^\s*evaluation warning:.*is deprecated/)) return false;
+        // Filter substituter/cache auth failures (noisy, not actionable by agent)
+        if (line.match(/^\s*warning: unable to download/)) return false;
         return true;
       })
       .join("\n")
