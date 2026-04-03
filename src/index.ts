@@ -567,6 +567,11 @@ const tools: z.infer<typeof ToolSchema>[] = [
           type: "number",
           description: "Optional: only show first N lines",
         },
+        stream: {
+          type: "string",
+          enum: ["stdout", "stderr", "both"],
+          description: "Which output stream to show (default: both)",
+        },
       },
       required: ["log_id"],
     },
@@ -577,6 +582,37 @@ const tools: z.infer<typeof ToolSchema>[] = [
     inputSchema: {
       type: "object" as const,
       properties: {},
+    },
+  },
+  {
+    name: "build_errors",
+    description:
+      "Extract error-relevant lines from a stored log. Returns only lines matching error patterns (error:, file:line:col, GHC codes, Rust errors, etc.) with surrounding context. Use this when you need to find the actual errors in a large build log.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        log_id: {
+          type: "string",
+          description: "The log ID from a previous command",
+        },
+        patterns: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Optional: additional regex patterns to match as errors (added to built-in patterns)",
+        },
+        context: {
+          type: "number",
+          description:
+            "Number of context lines around each error (default: 3)",
+        },
+        stream: {
+          type: "string",
+          enum: ["stdout", "stderr", "both"],
+          description: "Which output stream to search (default: both)",
+        },
+      },
+      required: ["log_id"],
     },
   },
 ];
@@ -621,6 +657,35 @@ async function execNix(
   });
 }
 
+const DRV_PATH_REGEX = /\/nix\/store\/[a-z0-9]+-[^\s']+\.drv/g;
+const MAX_FETCHED_LOG_LINES = 200;
+
+async function fetchBuildLog(
+  stderr: string,
+  workingDirectory?: string,
+): Promise<string | null> {
+  const drvPaths = stderr.match(DRV_PATH_REGEX);
+  if (!drvPaths || drvPaths.length === 0) return null;
+
+  // Deduplicate, take the last (most specific) derivation
+  const uniqueDrvs = [...new Set(drvPaths)];
+  const targetDrv = uniqueDrvs[uniqueDrvs.length - 1];
+
+  try {
+    const logResult = await execNix(["log", targetDrv], workingDirectory);
+    if (logResult.exitCode !== 0 || !logResult.stdout.trim()) {
+      return null;
+    }
+    const logLines = logResult.stdout.split("\n");
+    if (logLines.length > MAX_FETCHED_LOG_LINES) {
+      return extractErrorLines(logLines).join("\n");
+    }
+    return logResult.stdout;
+  } catch {
+    return null;
+  }
+}
+
 // Tool handlers
 async function handleTool(
   name: string,
@@ -634,6 +699,12 @@ async function handleTool(
       else if (args.out_link) nixArgs.push("-o", args.out_link as string);
       if (args.rebuild) nixArgs.push("--rebuild");
       const result = await execNix(nixArgs, args.working_directory as string);
+      if (result.exitCode !== 0) {
+        const buildLog = await fetchBuildLog(result.stderr, args.working_directory as string);
+        if (buildLog) {
+          result.stderr += "\n\n--- Build log (auto-fetched) ---\n" + buildLog;
+        }
+      }
       return formatResult(nixArgs.join(" "), result);
     }
 
@@ -642,6 +713,12 @@ async function handleTool(
       if (args.installable) nixArgs.push(args.installable as string);
       if (args.command) nixArgs.push("-c", "sh", "-c", args.command as string);
       const result = await execNix(nixArgs, args.working_directory as string);
+      if (result.exitCode !== 0) {
+        const buildLog = await fetchBuildLog(result.stderr, args.working_directory as string);
+        if (buildLog) {
+          result.stderr += "\n\n--- Build log (auto-fetched) ---\n" + buildLog;
+        }
+      }
       return formatResult(nixArgs.join(" "), result);
     }
 
@@ -706,6 +783,12 @@ async function handleTool(
       const nixArgs = ["flake", "check"];
       if (args.flake_ref) nixArgs.push(args.flake_ref as string);
       const result = await execNix(nixArgs, args.working_directory as string);
+      if (result.exitCode !== 0) {
+        const buildLog = await fetchBuildLog(result.stderr, args.working_directory as string);
+        if (buildLog) {
+          result.stderr += "\n\n--- Build log (auto-fetched) ---\n" + buildLog;
+        }
+      }
       return formatResult(nixArgs.join(" "), result);
     }
 
@@ -836,7 +919,15 @@ async function handleTool(
         return `Log not found: ${logId}\nUse nix_list_logs to see available logs.`;
       }
 
-      let output = entry.stdout + "\n" + entry.stderr;
+      const stream = (args.stream as string) || "both";
+      let output: string;
+      if (stream === "stdout") {
+        output = entry.stdout;
+      } else if (stream === "stderr") {
+        output = entry.stderr;
+      } else {
+        output = entry.stdout + (entry.stderr ? "\n" + entry.stderr : "");
+      }
 
       // Apply grep filter
       if (args.grep) {
@@ -882,6 +973,56 @@ async function handleTool(
         .join("\n");
     }
 
+    case "build_errors": {
+      const logId = args.log_id as string;
+      const entry = logStore.get(logId);
+      if (!entry) {
+        return `Log not found: ${logId}\nUse nix_list_logs to see available logs.`;
+      }
+
+      const stream = (args.stream as string) || "both";
+      let output: string;
+      if (stream === "stdout") output = entry.stdout;
+      else if (stream === "stderr") output = entry.stderr;
+      else output = entry.stdout + (entry.stderr ? "\n" + entry.stderr : "");
+
+      const lines = output.split("\n");
+
+      // Build pattern list: built-in + user-supplied
+      const patterns = [...ERROR_PATTERNS];
+      if (args.patterns) {
+        for (const p of args.patterns as string[]) {
+          try {
+            patterns.push(new RegExp(p));
+          } catch {
+            // Skip invalid regex
+          }
+        }
+      }
+
+      const contextSize = (args.context as number) ?? 3;
+      const extracted = extractErrorLines(lines, patterns, contextSize, contextSize);
+
+      const hasContent = extracted.some((line) => line.trim() !== "");
+      if (!hasContent) {
+        return [
+          `Command: nix ${entry.command}`,
+          `Exit code: ${entry.exitCode}`,
+          "",
+          "No error patterns found in log output.",
+          "Use get_log to see the full output.",
+        ].join("\n");
+      }
+
+      return [
+        `Command: nix ${entry.command}`,
+        `Exit code: ${entry.exitCode}`,
+        `Errors found:`,
+        "",
+        ...extracted,
+      ].join("\n");
+    }
+
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
@@ -889,6 +1030,107 @@ async function handleTool(
 
 const MAX_OUTPUT_LINES = 50;
 const MAX_OUTPUT_CHARS = 4000;
+
+const ERROR_PATTERNS: RegExp[] = [
+  /\berror:/i,
+  /\berror\[E\d+\]/,          // Rust error codes
+  /\bGHC-\d+/,                // Haskell error codes
+  /\.\w+:\d+:\d+:/,           // file:line:col (general)
+  /\bwarning:/,               // compiler warnings
+  /\bundefined reference/i,   // linker errors
+  /\bfailed\b/i,              // generic failure indicators
+  /^\s*\|/,                   // Rust/GHC error context lines (pipe-indented)
+];
+
+const CONTEXT_LINES_BEFORE = 2;
+const CONTEXT_LINES_AFTER = 3;
+const ORIENTATION_LINES = 5;
+const MAX_ERROR_TRUNCATED_LINES = 80;
+
+function extractErrorLines(
+  lines: string[],
+  patterns: RegExp[] = ERROR_PATTERNS,
+  contextBefore: number = CONTEXT_LINES_BEFORE,
+  contextAfter: number = CONTEXT_LINES_AFTER,
+): string[] {
+  // Find all line indices matching any error pattern
+  const errorIndices: Set<number> = new Set();
+  for (let i = 0; i < lines.length; i++) {
+    if (patterns.some((p) => p.test(lines[i]))) {
+      errorIndices.add(i);
+    }
+  }
+
+  // No errors found -> fallback to first/last split
+  if (errorIndices.size === 0) {
+    const keep = Math.floor(MAX_OUTPUT_LINES / 2);
+    const removed = lines.length - keep * 2;
+    return [
+      ...lines.slice(0, keep),
+      `... (${removed} lines omitted) ...`,
+      ...lines.slice(-keep),
+    ];
+  }
+
+  // Build "keep" set: error lines + context + orientation
+  const keepSet: Set<number> = new Set();
+
+  // Orientation: first and last N lines
+  for (let i = 0; i < Math.min(ORIENTATION_LINES, lines.length); i++) {
+    keepSet.add(i);
+  }
+  for (let i = Math.max(0, lines.length - ORIENTATION_LINES); i < lines.length; i++) {
+    keepSet.add(i);
+  }
+
+  // Error lines + context
+  for (const idx of errorIndices) {
+    for (
+      let i = Math.max(0, idx - contextBefore);
+      i <= Math.min(lines.length - 1, idx + contextAfter);
+      i++
+    ) {
+      keepSet.add(i);
+    }
+  }
+
+  // If too many kept lines, reduce context progressively
+  if (keepSet.size > MAX_ERROR_TRUNCATED_LINES) {
+    keepSet.clear();
+    for (let i = 0; i < Math.min(ORIENTATION_LINES, lines.length); i++) {
+      keepSet.add(i);
+    }
+    for (let i = Math.max(0, lines.length - ORIENTATION_LINES); i < lines.length; i++) {
+      keepSet.add(i);
+    }
+    // Keep only error lines + 1 line context
+    for (const idx of errorIndices) {
+      for (
+        let i = Math.max(0, idx - 1);
+        i <= Math.min(lines.length - 1, idx + 1);
+        i++
+      ) {
+        keepSet.add(i);
+      }
+    }
+  }
+
+  // Build output with gap markers
+  const sortedKeep = [...keepSet].sort((a, b) => a - b);
+  const result: string[] = [];
+  let lastIdx = -1;
+
+  for (const idx of sortedKeep) {
+    if (lastIdx !== -1 && idx > lastIdx + 1) {
+      const gapSize = idx - lastIdx - 1;
+      result.push(`... (${gapSize} lines omitted) ...`);
+    }
+    result.push(lines[idx]);
+    lastIdx = idx;
+  }
+
+  return result;
+}
 
 let logCounter = 0;
 
@@ -964,13 +1206,19 @@ function formatResult(
   let truncated = false;
 
   if (lines.length > MAX_OUTPUT_LINES) {
-    const keepLines = Math.floor(MAX_OUTPUT_LINES / 2);
-    const removed = lines.length - MAX_OUTPUT_LINES;
-    lines = [
-      ...lines.slice(0, keepLines),
-      `... (${removed} lines omitted) ...`,
-      ...lines.slice(-keepLines),
-    ];
+    if (result.exitCode !== 0) {
+      // Error-aware truncation: prioritize error lines over noise
+      lines = extractErrorLines(lines);
+    } else {
+      // Success output: keep first/last halves
+      const keepLines = Math.floor(MAX_OUTPUT_LINES / 2);
+      const removed = lines.length - MAX_OUTPUT_LINES;
+      lines = [
+        ...lines.slice(0, keepLines),
+        `... (${removed} lines omitted) ...`,
+        ...lines.slice(-keepLines),
+      ];
+    }
     truncated = true;
   }
 
