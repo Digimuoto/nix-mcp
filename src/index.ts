@@ -31,7 +31,7 @@ const tools: z.infer<typeof ToolSchema>[] = [
   {
     name: "build",
     description:
-      "Build a derivation or fetch a store path. This is the primary command for building packages with Nix. Use this instead of make, cargo build, npm build, etc. On failure, use build_errors with the returned log ID to extract error lines. To validate all flake outputs at once, prefer flake_check.",
+      "Build a derivation or fetch a store path. This is the primary command for building packages with Nix. Use this instead of make, cargo build, npm build, etc. On failure the footer shows a log ID — use build_errors(log_id) FIRST to extract error lines with context, then get_log(log_id, grep, grep_context) for deeper inspection. To validate all flake outputs at once, prefer flake_check.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -233,7 +233,7 @@ const tools: z.infer<typeof ToolSchema>[] = [
   {
     name: "flake_check",
     description:
-      "Check a flake for issues. Evaluates and validates all flake outputs and runs checks defined in the flake. Prefer this over build when you want to validate everything at once. On failure, use build_errors with the log ID to extract errors.",
+      "Check a flake for issues. Evaluates and validates all flake outputs and runs checks defined in the flake. Prefer this over build when you want to validate everything at once. On failure, use build_errors(log_id) FIRST to extract errors, then get_log for full inspection.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -428,7 +428,7 @@ const tools: z.infer<typeof ToolSchema>[] = [
   },
   {
     name: "log",
-    description: "Show the build log for a derivation from the Nix store or binary cache. Use this to see how a package was built. For logs from commands you just ran in this session, use get_log with the log ID instead.",
+    description: "Show the build log for a derivation from the Nix store or binary cache. Large logs are automatically error-extracted (keeping error lines + context, omitting noise). For logs from commands you just ran in this session, prefer build_errors(log_id) or get_log(log_id) instead — they are faster and support grep.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -543,7 +543,7 @@ const tools: z.infer<typeof ToolSchema>[] = [
   {
     name: "get_log",
     description:
-      "Retrieve the full output of a previous nix command by log ID. Every nix command stores its output with an ID shown in the footer (e.g., '[Full log: use nix_get_log with id=\"log-1\"]'). Use this when output was truncated, or with grep/head/tail to search large logs. See list_logs to find available log IDs.",
+      "Retrieve the full output of a previous nix command by log ID. For build failures, prefer build_errors first — it auto-extracts error lines. Use get_log for targeted searching: grep filters lines by regex, and grep_context adds surrounding lines (like grep -C) so you can see the error message around a match. Combine with head/tail to navigate large logs. See list_logs for available IDs.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -553,7 +553,11 @@ const tools: z.infer<typeof ToolSchema>[] = [
         },
         grep: {
           type: "string",
-          description: "Optional: filter log lines matching this pattern",
+          description: "Filter log lines by regex (case-insensitive). Tip: always pair with grep_context to see surrounding lines",
+        },
+        grep_context: {
+          type: "number",
+          description: "Lines of context around each grep match (like grep -C). Use 3-5 to see error messages around a matched filename or keyword. Default: 0",
         },
         tail: {
           type: "number",
@@ -574,7 +578,7 @@ const tools: z.infer<typeof ToolSchema>[] = [
   },
   {
     name: "list_logs",
-    description: "List available logs from previous nix commands in this session. Each entry shows the log ID, timestamp, command, and exit code. Use get_log with a log ID to retrieve full output, or build_errors to extract error lines.",
+    description: "List available logs from previous nix commands in this session. Each entry shows the log ID, timestamp, command, and exit code. For failed commands, use build_errors(log_id) to extract errors. For full output, use get_log(log_id).",
     inputSchema: {
       type: "object" as const,
       properties: {},
@@ -583,7 +587,7 @@ const tools: z.infer<typeof ToolSchema>[] = [
   {
     name: "build_errors",
     description:
-      "Extract error-relevant lines from a stored log. Returns only lines matching error patterns (error:, file:line:col, GHC codes, Rust errors, etc.) with surrounding context. Typical workflow: build or flake_check fails → use build_errors with the log ID from the failure to extract actionable errors → fix → rebuild.",
+      "FIRST tool to use after a build failure. Extracts error-relevant lines from a stored log with surrounding context. Built-in patterns cover: error:/warning:, file:line:col, GHC codes (GHC-NNNNN), Rust error codes (E0XXX), linker errors, and pipe-indented context lines. Workflow: build/flake_check fails → build_errors(log_id) → read errors → fix → rebuild. Only fall back to get_log if build_errors misses something.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -1051,23 +1055,42 @@ async function fetchBuildLog(
   const drvPaths = stderr.match(DRV_PATH_REGEX);
   if (!drvPaths || drvPaths.length === 0) return null;
 
-  // Deduplicate, take the last (most specific) derivation
+  // Deduplicate; try each derivation looking for one with errors
   const uniqueDrvs = [...new Set(drvPaths)];
-  const targetDrv = uniqueDrvs[uniqueDrvs.length - 1];
+  let bestLog: string | null = null;
 
-  try {
-    const logResult = await execNix(["log", targetDrv], workingDirectory);
-    if (logResult.exitCode !== 0 || !logResult.stdout.trim()) {
-      return null;
+  // Try derivations in reverse order (most specific first)
+  for (let i = uniqueDrvs.length - 1; i >= 0; i--) {
+    try {
+      const logResult = await execNix(["log", uniqueDrvs[i]], workingDirectory);
+      if (logResult.exitCode !== 0 || !logResult.stdout.trim()) continue;
+
+      const logLines = logResult.stdout.split("\n");
+      const hasErrors = logLines.some((line) =>
+        ERROR_PATTERNS.some((p) => p.test(line)),
+      );
+
+      if (hasErrors) {
+        // Found a log with actual errors — use it
+        if (logLines.length > MAX_FETCHED_LOG_LINES) {
+          return extractErrorLines(logLines).join("\n");
+        }
+        return logResult.stdout;
+      }
+
+      // Keep as fallback if no error-containing log is found
+      if (!bestLog) {
+        bestLog =
+          logLines.length > MAX_FETCHED_LOG_LINES
+            ? extractErrorLines(logLines).join("\n")
+            : logResult.stdout;
+      }
+    } catch {
+      continue;
     }
-    const logLines = logResult.stdout.split("\n");
-    if (logLines.length > MAX_FETCHED_LOG_LINES) {
-      return extractErrorLines(logLines).join("\n");
-    }
-    return logResult.stdout;
-  } catch {
-    return null;
   }
+
+  return bestLog;
 }
 
 // Tool handlers
@@ -1251,6 +1274,15 @@ async function handleTool(
     case "log": {
       const nixArgs = ["log", args.installable as string];
       const result = await execNix(nixArgs, args.working_directory as string);
+
+      // For large build logs, use error extraction instead of generic truncation
+      if (result.stdout) {
+        const logLines = result.stdout.split("\n");
+        if (logLines.length > MAX_OUTPUT_LINES) {
+          const extracted = extractErrorLines(logLines);
+          result.stdout = extracted.join("\n");
+        }
+      }
       return formatResult(nixArgs.join(" "), result);
     }
 
@@ -1312,10 +1344,37 @@ async function handleTool(
       // Apply grep filter
       if (args.grep) {
         const pattern = new RegExp(args.grep as string, "i");
-        output = output
-          .split("\n")
-          .filter((line) => pattern.test(line))
-          .join("\n");
+        const contextSize = (args.grep_context as number) ?? 0;
+        const allLines = output.split("\n");
+
+        if (contextSize > 0) {
+          // Context-aware grep: keep N lines around each match
+          const matchIndices: Set<number> = new Set();
+          for (let i = 0; i < allLines.length; i++) {
+            if (pattern.test(allLines[i])) {
+              for (
+                let j = Math.max(0, i - contextSize);
+                j <= Math.min(allLines.length - 1, i + contextSize);
+                j++
+              ) {
+                matchIndices.add(j);
+              }
+            }
+          }
+          const sorted = [...matchIndices].sort((a, b) => a - b);
+          const result: string[] = [];
+          let lastIdx = -1;
+          for (const idx of sorted) {
+            if (lastIdx !== -1 && idx > lastIdx + 1) {
+              result.push(`... (${idx - lastIdx - 1} lines omitted) ...`);
+            }
+            result.push(allLines[idx]);
+            lastIdx = idx;
+          }
+          output = result.join("\n");
+        } else {
+          output = allLines.filter((line) => pattern.test(line)).join("\n");
+        }
       }
 
       // Apply head/tail
@@ -1820,7 +1879,10 @@ function formatResult(
   if (result.exitCode !== 0) {
     statusParts.push(`Exit code: ${result.exitCode}`);
   }
-  if (logId) {
+  if (logId && result.exitCode !== 0) {
+    statusParts.push(`Errors: use nix_build_errors with id="${logId}"`);
+    statusParts.push(`Full log: use nix_get_log with id="${logId}"`);
+  } else if (logId) {
     statusParts.push(`Full log: use nix_get_log with id="${logId}"`);
   }
 
@@ -1865,10 +1927,12 @@ Always use the modern \`nix\` command (NOT legacy nix-shell, nix-build, nix-env)
 
 ## Tool Workflows
 
-### Build & Debug
-1. \`build\` to compile — on failure, \`build_errors <log-id>\` to extract actionable error lines
-2. \`get_log <log-id>\` with grep/head/tail for full log inspection
-3. \`list_logs\` to see all stored logs from this session
+### Build & Debug (error-finding workflow)
+1. \`build\` or \`flake_check\` to compile — on failure, the footer shows a log ID
+2. \`build_errors(log_id)\` — **always try this first**. Extracts error/warning lines with context using built-in patterns (error:, file:line:col, GHC codes, Rust E-codes, linker errors)
+3. \`get_log(log_id, grep="pattern", grep_context=3)\` — targeted search with context lines around matches. Use when build_errors misses something or you need to search for a specific symbol/file
+4. \`get_log(log_id, tail=100)\` — see the end of the log (where errors usually appear)
+5. \`list_logs\` — find log IDs from earlier commands
 
 ### Explore a Flake
 1. \`flake_show\` — what outputs are available (packages, apps, devShells, checks)
@@ -1885,12 +1949,18 @@ Always use the modern \`nix\` command (NOT legacy nix-shell, nix-build, nix-env)
 - **run vs develop -c**: use \`run\` for one-off executables (nixpkgs#hello); use \`develop -c\` for commands that need the project's build environment
 - **flake_show vs flake_metadata**: \`flake_show\` lists outputs; \`flake_metadata\` shows inputs/lock/revision
 - **eval vs derivation_show**: \`eval\` is lightweight for specific values; \`derivation_show\` gives the full build recipe
-- **log vs get_log**: \`log\` fetches build logs from the Nix store/cache; \`get_log\` retrieves output from commands run in this session
+- **log vs get_log vs build_errors**: \`build_errors\` extracts errors with context (try first); \`get_log\` retrieves full output with grep+context support; \`log\` fetches from the Nix store (for derivations not built in this session)
 
 ### Log System
-Every nix command stores its full output with a log ID. When output is truncated, the footer shows:
-\`[Full log: use nix_get_log with id="log-N"]\`
-Use \`get_log\` with that ID to retrieve the full output. Use \`build_errors\` with the ID to extract just the error lines.
+Every nix command stores its full output with a log ID. When a command fails, the footer shows:
+\`[Exit code: 1 | Errors: use nix_build_errors with id="log-N" | Full log: use nix_get_log with id="log-N"]\`
+
+**Error debugging priority:**
+1. \`build_errors(log_id)\` — auto-extracts error lines with context. Start here.
+2. \`build_errors(log_id, patterns=["my_regex"])\` — add custom patterns if built-in ones miss your error
+3. \`get_log(log_id, grep="filename", grep_context=5)\` — search with context (like grep -C5)
+4. \`get_log(log_id)\` — full unfiltered output as last resort
+5. \`log(installable)\` — fetch build log from nix store (for derivations not built in this session)
 
 ## Common Workflow
 
