@@ -31,7 +31,7 @@ const tools: z.infer<typeof ToolSchema>[] = [
   {
     name: "build",
     description:
-      "Build a derivation or fetch a store path. This is the primary command for building packages with Nix. Use this instead of make, cargo build, npm build, etc.",
+      "Build a derivation or fetch a store path. This is the primary command for building packages with Nix. Use this instead of make, cargo build, npm build, etc. On failure, use build_errors with the returned log ID to extract error lines. To validate all flake outputs at once, prefer flake_check.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -59,7 +59,7 @@ const tools: z.infer<typeof ToolSchema>[] = [
   {
     name: "develop",
     description:
-      "Enter or get information about a development shell that provides the build environment of a derivation. Use this instead of manual environment setup.",
+      "Enter or get information about a development shell. Use this instead of manual environment setup. Pass a command with the 'command' parameter to run it inside the shell (e.g., 'ghc --version'). For one-off executables, prefer run instead.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -82,7 +82,7 @@ const tools: z.infer<typeof ToolSchema>[] = [
   {
     name: "run",
     description:
-      "Run a Nix application directly without installing it. Great for trying out packages.",
+      "Run a Nix application directly without installing it. Great for trying out packages or one-off commands. For running commands inside a project's build environment, use develop with a command instead.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -107,7 +107,7 @@ const tools: z.infer<typeof ToolSchema>[] = [
   {
     name: "search",
     description:
-      "Search for packages in nixpkgs or flakes. Use this to find available packages.",
+      "Search for packages in nixpkgs or flakes by name. Use this to find available packages. To see what a specific flake provides, use flake_show instead.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -169,7 +169,7 @@ const tools: z.infer<typeof ToolSchema>[] = [
   {
     name: "flake_show",
     description:
-      "Show the outputs of a flake. Useful for understanding what a flake provides.",
+      "Show the outputs of a flake (packages, apps, devShells, checks, etc.). Start here to discover what a flake provides. For input/revision/lock info, use flake_metadata instead. To inspect a specific attribute value, use eval.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -192,7 +192,7 @@ const tools: z.infer<typeof ToolSchema>[] = [
   {
     name: "flake_metadata",
     description:
-      "Show metadata about a flake including inputs, revision, and last modified time.",
+      "Show metadata about a flake: inputs, revision, lock state, and last modified time. Use this to inspect the dependency graph and lock file. For what the flake outputs (packages, shells, etc.), use flake_show instead.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -233,7 +233,7 @@ const tools: z.infer<typeof ToolSchema>[] = [
   {
     name: "flake_check",
     description:
-      "Check a flake for issues. Validates the flake outputs and runs checks defined in the flake.",
+      "Check a flake for issues. Evaluates and validates all flake outputs and runs checks defined in the flake. Prefer this over build when you want to validate everything at once. On failure, use build_errors with the log ID to extract errors.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -270,7 +270,7 @@ const tools: z.infer<typeof ToolSchema>[] = [
   {
     name: "eval",
     description:
-      "Evaluate a Nix expression and print the result. Useful for inspecting values and debugging.",
+      "Evaluate a Nix expression and print the result. Lightweight way to inspect specific attribute values (e.g., '.#pkg.meta.description') without fetching the full derivation. For structured build info, use derivation_show instead.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -391,7 +391,7 @@ const tools: z.infer<typeof ToolSchema>[] = [
   },
   {
     name: "store_path_info",
-    description: "Query information about store paths.",
+    description: "Query information about store paths including size, references, and signatures. Use with closure_size to measure total closure. For dependency chains, use why_depends. For listing files inside a path, use store_ls.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -428,7 +428,7 @@ const tools: z.infer<typeof ToolSchema>[] = [
   },
   {
     name: "log",
-    description: "Show the build log for a derivation.",
+    description: "Show the build log for a derivation from the Nix store or binary cache. Use this to see how a package was built. For logs from commands you just ran in this session, use get_log with the log ID instead.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -447,7 +447,7 @@ const tools: z.infer<typeof ToolSchema>[] = [
   {
     name: "why_depends",
     description:
-      "Show why one package depends on another. Useful for debugging closures.",
+      "Show why one package depends on another by tracing the dependency chain. Use this for closure debugging. For closure size, use store_path_info with closure_size. For full derivation inputs, use derivation_show.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -470,7 +470,7 @@ const tools: z.infer<typeof ToolSchema>[] = [
   {
     name: "derivation_show",
     description:
-      "Show the derivation(s) for an installable. Useful for debugging build issues.",
+      "Show the full derivation for an installable (build inputs, args, env, outputs). Use for deep build debugging. For quick attribute inspection, eval is cheaper. For dependency chains, use why_depends.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -543,7 +543,7 @@ const tools: z.infer<typeof ToolSchema>[] = [
   {
     name: "get_log",
     description:
-      "Retrieve the full output of a previous nix command. Use this when output was truncated and you need to see the full log.",
+      "Retrieve the full output of a previous nix command by log ID. Every nix command stores its output with an ID shown in the footer (e.g., '[Full log: use nix_get_log with id=\"log-1\"]'). Use this when output was truncated, or with grep/head/tail to search large logs. See list_logs to find available log IDs.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -574,7 +574,7 @@ const tools: z.infer<typeof ToolSchema>[] = [
   },
   {
     name: "list_logs",
-    description: "List available logs from previous nix commands.",
+    description: "List available logs from previous nix commands in this session. Each entry shows the log ID, timestamp, command, and exit code. Use get_log with a log ID to retrieve full output, or build_errors to extract error lines.",
     inputSchema: {
       type: "object" as const,
       properties: {},
@@ -583,7 +583,7 @@ const tools: z.infer<typeof ToolSchema>[] = [
   {
     name: "build_errors",
     description:
-      "Extract error-relevant lines from a stored log. Returns only lines matching error patterns (error:, file:line:col, GHC codes, Rust errors, etc.) with surrounding context. Use this when you need to find the actual errors in a large build log.",
+      "Extract error-relevant lines from a stored log. Returns only lines matching error patterns (error:, file:line:col, GHC codes, Rust errors, etc.) with surrounding context. Typical workflow: build or flake_check fails → use build_errors with the log ID from the failure to extract actionable errors → fix → rebuild.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -644,7 +644,7 @@ const tools: z.infer<typeof ToolSchema>[] = [
   {
     name: "store_ls",
     description:
-      "List contents of a store path. Useful for inspecting what a build produced.",
+      "List contents of a store path. Useful for inspecting what a build produced. Use store_cat to read a specific file inside the path. For metadata (size, references), use store_path_info.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -687,7 +687,7 @@ const tools: z.infer<typeof ToolSchema>[] = [
   {
     name: "store_diff_closures",
     description:
-      "Show what packages and versions were added/removed/changed between two closures. Great for understanding what an update changed.",
+      "Show what packages and versions were added/removed/changed between two closures. Great for understanding what an update changed. For profile-level diffs across generations, use profile_diff_closures instead.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -1863,32 +1863,61 @@ Always use the modern \`nix\` command (NOT legacy nix-shell, nix-build, nix-env)
 3. **Use nix build** - Build projects with \`nix build\`, not language-specific build tools directly
 4. **Use nix flake check** - Validate flakes and run tests with \`nix flake check\`
 
+## Tool Workflows
+
+### Build & Debug
+1. \`build\` to compile — on failure, \`build_errors <log-id>\` to extract actionable error lines
+2. \`get_log <log-id>\` with grep/head/tail for full log inspection
+3. \`list_logs\` to see all stored logs from this session
+
+### Explore a Flake
+1. \`flake_show\` — what outputs are available (packages, apps, devShells, checks)
+2. \`flake_metadata\` — inputs, revision, lock state
+3. \`eval .#attr.path\` — inspect specific attribute values (cheaper than derivation_show)
+
+### Closure Analysis
+1. \`store_path_info --closure-size\` — how big is the closure?
+2. \`why_depends A B\` — trace dependency chains between packages
+3. \`derivation_show\` — full drv for deep inspection of build inputs/env/args
+
+### Choosing the Right Tool
+- **build vs flake_check**: use \`flake_check\` to validate all outputs at once; use \`build\` for a specific package
+- **run vs develop -c**: use \`run\` for one-off executables (nixpkgs#hello); use \`develop -c\` for commands that need the project's build environment
+- **flake_show vs flake_metadata**: \`flake_show\` lists outputs; \`flake_metadata\` shows inputs/lock/revision
+- **eval vs derivation_show**: \`eval\` is lightweight for specific values; \`derivation_show\` gives the full build recipe
+- **log vs get_log**: \`log\` fetches build logs from the Nix store/cache; \`get_log\` retrieves output from commands run in this session
+
+### Log System
+Every nix command stores its full output with a log ID. When output is truncated, the footer shows:
+\`[Full log: use nix_get_log with id="log-N"]\`
+Use \`get_log\` with that ID to retrieve the full output. Use \`build_errors\` with the ID to extract just the error lines.
+
 ## Common Workflow
 
 ### Starting a new project
-1. \`nix flake init -t templates#<language>\` or create flake.nix manually
-2. \`nix flake lock\` to create lock file
+1. \`flake_init\` or create flake.nix manually
+2. \`flake_lock\` to create lock file
 3. Add flake.nix and flake.lock to git
 
 ### Development
-1. \`nix develop\` - Enter the dev shell with all dependencies
-2. \`nix develop -c <command>\` - Run a single command in the dev shell
-3. \`nix build\` - Build the project
-4. \`nix run\` - Run the default app
+1. \`develop\` - Enter the dev shell with all dependencies
+2. \`develop -c <command>\` - Run a single command in the dev shell
+3. \`build\` - Build the project
+4. \`run\` - Run the default app
 
 ### Checking/Testing
-1. \`nix flake check\` - Run all checks defined in the flake
-2. \`nix flake show\` - See what outputs the flake provides
+1. \`flake_check\` - Run all checks defined in the flake
+2. \`flake_show\` - See what outputs the flake provides
 
 ### Updating dependencies
-1. \`nix flake update\` - Update all inputs
-2. \`nix flake update <input>\` - Update specific input
+1. \`flake_update\` - Update all inputs
+2. \`flake_update [input]\` - Update specific input
 
 ## Important Notes
 
 - Always check for existing flake.nix before suggesting other build methods
-- Use \`nix develop -c\` to run build commands within the flake's environment
-- Prefer \`nix build\` over direct invocation of cargo/npm/make etc.
+- Use \`develop -c\` to run build commands within the flake's environment
+- Prefer \`build\` over direct invocation of cargo/npm/make etc.
 - The dev shell provides all necessary tools - don't install them globally
 `;
 
@@ -2052,7 +2081,7 @@ ${template}
 const server = new Server(
   {
     name: "nix-mcp",
-    version: "1.0.0",
+    version: "1.3.0",
   },
   {
     capabilities: {
