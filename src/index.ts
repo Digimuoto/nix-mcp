@@ -250,18 +250,14 @@ const tools: z.infer<typeof ToolSchema>[] = [
   },
   {
     name: "flake_lock",
-    description: "Create or update a flake lock file without building.",
+    description:
+      "Create or update a flake lock file without building. Only adds missing inputs; use flake_update to update existing inputs.",
     inputSchema: {
       type: "object" as const,
       properties: {
         flake_ref: {
           type: "string",
           description: "Flake reference (defaults to current directory)",
-        },
-        update_input: {
-          type: "array",
-          items: { type: "string" },
-          description: "Specific inputs to update",
         },
         working_directory: {
           type: "string",
@@ -323,7 +319,7 @@ const tools: z.infer<typeof ToolSchema>[] = [
   {
     name: "profile_install",
     description:
-      "Install a package into a profile. Use this for persistent installations.",
+      "Install packages into a profile (alias: profile_add). Use this for persistent installations.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -615,6 +611,394 @@ const tools: z.infer<typeof ToolSchema>[] = [
       required: ["log_id"],
     },
   },
+  // --- Config commands ---
+  {
+    name: "config_show",
+    description:
+      "Show Nix configuration settings. Useful for debugging substituters, experimental-features, trusted users, etc.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        setting: {
+          type: "string",
+          description:
+            "Specific setting to show (e.g., 'substituters', 'experimental-features'). Shows all if omitted.",
+        },
+        json: {
+          type: "boolean",
+          description: "Output in JSON format",
+        },
+      },
+    },
+  },
+  {
+    name: "config_check",
+    description:
+      "Check your system for potential Nix problems. Reports PASS/FAIL for each check.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
+    },
+  },
+  // --- Store commands ---
+  {
+    name: "store_ls",
+    description:
+      "List contents of a store path. Useful for inspecting what a build produced.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        path: {
+          type: "string",
+          description: "Store path to list (e.g., '/nix/store/...-hello-2.12')",
+        },
+        long: {
+          type: "boolean",
+          description: "Show detailed info including size",
+        },
+        json: {
+          type: "boolean",
+          description: "Output in JSON format",
+        },
+        recursive: {
+          type: "boolean",
+          description: "List recursively",
+        },
+      },
+      required: ["path"],
+    },
+  },
+  {
+    name: "store_cat",
+    description:
+      "Print the contents of a file inside a store path. Read files without copying them out of the store.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        path: {
+          type: "string",
+          description:
+            "Full path to a file in the store (e.g., '/nix/store/...-hello-2.12/bin/hello')",
+        },
+      },
+      required: ["path"],
+    },
+  },
+  {
+    name: "store_diff_closures",
+    description:
+      "Show what packages and versions were added/removed/changed between two closures. Great for understanding what an update changed.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        before: {
+          type: "string",
+          description: "Store path or profile link for the 'before' state",
+        },
+        after: {
+          type: "string",
+          description: "Store path or profile link for the 'after' state",
+        },
+      },
+      required: ["before", "after"],
+    },
+  },
+  {
+    name: "store_delete",
+    description: "Delete paths from the Nix store.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        paths: {
+          type: "array",
+          items: { type: "string" },
+          description: "Store paths to delete",
+        },
+      },
+      required: ["paths"],
+    },
+  },
+  // --- Hash commands ---
+  {
+    name: "hash_file",
+    description:
+      "Compute the cryptographic hash of a file. Essential for writing fixed-output derivations and updating src hashes.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        path: {
+          type: "string",
+          description: "Path to the file to hash",
+        },
+        type: {
+          type: "string",
+          enum: ["sha256", "sha512", "sha1", "md5"],
+          description: "Hash algorithm (default: sha256)",
+        },
+        sri: {
+          type: "boolean",
+          description: "Output in SRI format (recommended for Nix expressions)",
+        },
+      },
+      required: ["path"],
+    },
+  },
+  {
+    name: "hash_convert",
+    description:
+      "Convert between hash formats (SRI, base16, nix32, base64). Useful when Nix gives you a hash in one format but you need another.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        hash: {
+          type: "string",
+          description: "The hash to convert",
+        },
+        from: {
+          type: "string",
+          enum: ["sri", "base16", "nix32", "base64"],
+          description: "Source format (auto-detected if omitted)",
+        },
+        to: {
+          type: "string",
+          enum: ["sri", "base16", "nix32", "base64"],
+          description: "Target format (default: sri)",
+        },
+      },
+      required: ["hash"],
+    },
+  },
+  // --- Profile commands ---
+  {
+    name: "profile_history",
+    description:
+      "Show all versions of a profile. Useful for seeing what changed and deciding whether to rollback.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        profile: {
+          type: "string",
+          description: "Profile path (defaults to user profile)",
+        },
+      },
+    },
+  },
+  {
+    name: "profile_rollback",
+    description:
+      "Roll back to the previous version or a specified version of a profile.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        profile: {
+          type: "string",
+          description: "Profile path (defaults to user profile)",
+        },
+        to: {
+          type: "number",
+          description: "Specific generation number to roll back to",
+        },
+      },
+    },
+  },
+  {
+    name: "profile_diff_closures",
+    description:
+      "Show the closure difference between each version of a profile. Shows package additions, removals, and version changes.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        profile: {
+          type: "string",
+          description: "Profile path (defaults to user profile)",
+        },
+      },
+    },
+  },
+  // --- Copy command ---
+  {
+    name: "copy",
+    description:
+      "Copy store paths between Nix stores. Use this to push to binary caches or transfer between machines.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        installables: {
+          type: "array",
+          items: { type: "string" },
+          description: "Store paths or installables to copy",
+        },
+        to: {
+          type: "string",
+          description:
+            "Destination store URI (e.g., 's3://my-cache', 'ssh://server')",
+        },
+        from: {
+          type: "string",
+          description: "Source store URI (default: local store)",
+        },
+        no_check_sigs: {
+          type: "boolean",
+          description: "Don't require signatures on copied paths",
+        },
+      },
+      required: ["installables"],
+    },
+  },
+  // --- Flake commands (additional) ---
+  {
+    name: "flake_archive",
+    description:
+      "Copy a flake and all its inputs to a store. Use for offline work or pushing to binary caches.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        flake_ref: {
+          type: "string",
+          description: "Flake reference (defaults to current directory)",
+        },
+        to: {
+          type: "string",
+          description: "Destination store URI (e.g., 's3://my-cache')",
+        },
+        json: {
+          type: "boolean",
+          description: "Output in JSON format",
+        },
+        working_directory: {
+          type: "string",
+          description: "Directory to run the command in",
+        },
+      },
+    },
+  },
+  {
+    name: "flake_prefetch",
+    description:
+      "Download the source tree of a flake into the Nix store without building.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        flake_ref: {
+          type: "string",
+          description: "Flake reference to prefetch",
+        },
+        json: {
+          type: "boolean",
+          description: "Output in JSON format (includes store path and hash)",
+        },
+      },
+      required: ["flake_ref"],
+    },
+  },
+  {
+    name: "flake_prefetch_inputs",
+    description:
+      "Fetch all inputs of a flake in parallel. Useful for CI pre-warming or preparing for offline work.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        flake_ref: {
+          type: "string",
+          description: "Flake reference (defaults to current directory)",
+        },
+        working_directory: {
+          type: "string",
+          description: "Directory to run the command in",
+        },
+      },
+    },
+  },
+  {
+    name: "flake_clone",
+    description: "Clone a flake repository to a local directory.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        flake_ref: {
+          type: "string",
+          description: "Flake reference to clone",
+        },
+        dest: {
+          type: "string",
+          description: "Destination directory",
+        },
+      },
+      required: ["flake_ref", "dest"],
+    },
+  },
+  // --- Bundle command ---
+  {
+    name: "bundle",
+    description:
+      "Bundle an application so it works outside of the Nix store. Creates a standalone executable.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        installable: {
+          type: "string",
+          description: "The installable to bundle",
+        },
+        out_link: {
+          type: "string",
+          description: "Path for the output symlink",
+        },
+        working_directory: {
+          type: "string",
+          description: "Directory to run the command in",
+        },
+      },
+      required: ["installable"],
+    },
+  },
+  // --- Registry commands (additional) ---
+  {
+    name: "registry_add",
+    description: "Add or replace a flake in the user flake registry.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        name: {
+          type: "string",
+          description: "Registry entry name",
+        },
+        flake_ref: {
+          type: "string",
+          description: "Flake reference to register",
+        },
+      },
+      required: ["name", "flake_ref"],
+    },
+  },
+  {
+    name: "registry_pin",
+    description:
+      "Pin a flake registry entry to its current resolved version.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        name: {
+          type: "string",
+          description: "Registry entry name to pin",
+        },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "registry_remove",
+    description: "Remove a flake from the user flake registry.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        name: {
+          type: "string",
+          description: "Registry entry name to remove",
+        },
+      },
+      required: ["name"],
+    },
+  },
 ];
 
 // Execute a nix command
@@ -795,11 +1179,6 @@ async function handleTool(
     case "flake_lock": {
       const nixArgs = ["flake", "lock"];
       if (args.flake_ref) nixArgs.push(args.flake_ref as string);
-      if (args.update_input) {
-        for (const input of args.update_input as string[]) {
-          nixArgs.push("--update-input", input);
-        }
-      }
       const result = await execNix(nixArgs, args.working_directory as string);
       return formatResult(nixArgs.join(" "), result);
     }
@@ -822,6 +1201,7 @@ async function handleTool(
       return formatResult(nixArgs.join(" "), result);
     }
 
+    case "profile_add":
     case "profile_install": {
       const nixArgs = ["profile", "install"];
       if (args.profile) nixArgs.push("--profile", args.profile as string);
@@ -1021,6 +1401,184 @@ async function handleTool(
         "",
         ...extracted,
       ].join("\n");
+    }
+
+    // --- Config commands ---
+
+    case "config_show": {
+      const nixArgs = ["config", "show"];
+      if (args.setting) nixArgs.push(args.setting as string);
+      if (args.json) nixArgs.push("--json");
+      const result = await execNix(nixArgs);
+      return formatResult(nixArgs.join(" "), result);
+    }
+
+    case "config_check": {
+      const nixArgs = ["config", "check"];
+      const result = await execNix(nixArgs);
+      return formatResult(nixArgs.join(" "), result);
+    }
+
+    // --- Store commands ---
+
+    case "store_ls": {
+      const nixArgs = ["store", "ls"];
+      if (args.long) nixArgs.push("-l");
+      if (args.json) nixArgs.push("--json");
+      if (args.recursive) nixArgs.push("-R");
+      nixArgs.push(args.path as string);
+      const result = await execNix(nixArgs);
+      return formatResult(nixArgs.join(" "), result);
+    }
+
+    case "store_cat": {
+      const nixArgs = ["store", "cat", args.path as string];
+      const result = await execNix(nixArgs);
+      return formatResult(nixArgs.join(" "), result);
+    }
+
+    case "store_diff_closures": {
+      const nixArgs = [
+        "store",
+        "diff-closures",
+        args.before as string,
+        args.after as string,
+      ];
+      const result = await execNix(nixArgs);
+      return formatResult(nixArgs.join(" "), result);
+    }
+
+    case "store_delete": {
+      const nixArgs = ["store", "delete"];
+      nixArgs.push(...(args.paths as string[]));
+      const result = await execNix(nixArgs);
+      return formatResult(nixArgs.join(" "), result);
+    }
+
+    // --- Hash commands ---
+
+    case "hash_file": {
+      const nixArgs = ["hash", "file", args.path as string];
+      if (args.type) nixArgs.push("--type", args.type as string);
+      if (args.sri) nixArgs.push("--sri");
+      const result = await execNix(nixArgs);
+      return formatResult(nixArgs.join(" "), result);
+    }
+
+    case "hash_convert": {
+      const nixArgs = ["hash", "convert"];
+      if (args.from) nixArgs.push("--from", args.from as string);
+      if (args.to) nixArgs.push("--to", args.to as string);
+      nixArgs.push(args.hash as string);
+      const result = await execNix(nixArgs);
+      return formatResult(nixArgs.join(" "), result);
+    }
+
+    // --- Profile commands ---
+
+    case "profile_history": {
+      const nixArgs = ["profile", "history"];
+      if (args.profile) nixArgs.push("--profile", args.profile as string);
+      const result = await execNix(nixArgs);
+      return formatResult(nixArgs.join(" "), result);
+    }
+
+    case "profile_rollback": {
+      const nixArgs = ["profile", "rollback"];
+      if (args.profile) nixArgs.push("--profile", args.profile as string);
+      if (args.to !== undefined) nixArgs.push("--to", String(args.to));
+      const result = await execNix(nixArgs);
+      return formatResult(nixArgs.join(" "), result);
+    }
+
+    case "profile_diff_closures": {
+      const nixArgs = ["profile", "diff-closures"];
+      if (args.profile) nixArgs.push("--profile", args.profile as string);
+      const result = await execNix(nixArgs);
+      return formatResult(nixArgs.join(" "), result);
+    }
+
+    // --- Copy command ---
+
+    case "copy": {
+      const nixArgs = ["copy"];
+      if (args.to) nixArgs.push("--to", args.to as string);
+      if (args.from) nixArgs.push("--from", args.from as string);
+      if (args.no_check_sigs) nixArgs.push("--no-check-sigs");
+      nixArgs.push(...(args.installables as string[]));
+      const result = await execNix(nixArgs);
+      return formatResult(nixArgs.join(" "), result);
+    }
+
+    // --- Flake commands (additional) ---
+
+    case "flake_archive": {
+      const nixArgs = ["flake", "archive"];
+      if (args.flake_ref) nixArgs.push(args.flake_ref as string);
+      if (args.to) nixArgs.push("--to", args.to as string);
+      if (args.json) nixArgs.push("--json");
+      const result = await execNix(nixArgs, args.working_directory as string);
+      return formatResult(nixArgs.join(" "), result);
+    }
+
+    case "flake_prefetch": {
+      const nixArgs = ["flake", "prefetch", args.flake_ref as string];
+      if (args.json) nixArgs.push("--json");
+      const result = await execNix(nixArgs);
+      return formatResult(nixArgs.join(" "), result);
+    }
+
+    case "flake_prefetch_inputs": {
+      const nixArgs = ["flake", "prefetch-inputs"];
+      if (args.flake_ref) nixArgs.push(args.flake_ref as string);
+      const result = await execNix(nixArgs, args.working_directory as string);
+      return formatResult(nixArgs.join(" "), result);
+    }
+
+    case "flake_clone": {
+      const nixArgs = [
+        "flake",
+        "clone",
+        args.flake_ref as string,
+        "--dest",
+        args.dest as string,
+      ];
+      const result = await execNix(nixArgs);
+      return formatResult(nixArgs.join(" "), result);
+    }
+
+    // --- Bundle command ---
+
+    case "bundle": {
+      const nixArgs = ["bundle", args.installable as string];
+      if (args.out_link) nixArgs.push("-o", args.out_link as string);
+      const result = await execNix(nixArgs, args.working_directory as string);
+      return formatResult(nixArgs.join(" "), result);
+    }
+
+    // --- Registry commands (additional) ---
+
+    case "registry_add": {
+      const nixArgs = [
+        "registry",
+        "add",
+        args.name as string,
+        args.flake_ref as string,
+      ];
+      const result = await execNix(nixArgs);
+      return formatResult(nixArgs.join(" "), result);
+    }
+
+    case "registry_pin": {
+      const nixArgs = ["registry", "pin", args.name as string];
+      const result = await execNix(nixArgs);
+      return formatResult(nixArgs.join(" "), result);
+    }
+
+    case "registry_remove": {
+      const nixArgs = ["registry", "remove", args.name as string];
+      const result = await execNix(nixArgs);
+      return formatResult(nixArgs.join(" "), result);
     }
 
     default:
